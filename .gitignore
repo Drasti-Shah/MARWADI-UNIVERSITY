@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+static/audio/*.wav
+!static/audio/.gitkeep
+data/app.db
+data/app.db-wal
+data/app.db-shm
+server.log
+ngrok.log
