@@ -1,12 +1,14 @@
 # Marwadi University – Admission Voice Agent (Demo)
 
-A Gujarati voice agent that takes a phone call, asks for the student's **latest
-qualification**, **recommends a matching degree** at Marwadi University, and reads
-out the key details (duration, fees, eligibility, required documents).
+A Gujarati voice agent that takes a phone call and walks the student through a
+guided admission flow: it asks their **name**, **latest qualification** and
+**marks**, cheers their marks, lists the **degrees they can pursue**, then gives
+**course details** for whichever degree they pick (and handles placement questions).
 
 **Stack**
 - **Twilio** – telephony (turn-based `<Record>` + `<Play>`)
-- **Bhashini** – Gujarati **ASR**, **translation**, **TTS** (1 call inbound, 1 call outbound for low latency)
+- **Sarvam AI** – Gujarati **STT** (Saaras + Saarika), **translation** (Mayura), **TTS** (Bulbul)
+  - *Bhashini remains a built-in fallback if no Sarvam key is set.*
 - **OpenAI GPT-4o-mini** – the advisor brain (reasons in English)
 - **FastAPI** – webhook server
 - **ngrok** – public tunnel to your local server
@@ -18,13 +20,19 @@ Caller (Gujarati)
 Twilio  ──<Record>──▶  /process
    │                      │ download WAV
    │                      ▼
-   │            Bhashini ASR + translate (gu → en)
+   │            Sarvam STT  (saaras → English  +  saarika → Gujarati, in parallel)
    │                      ▼
    │              GPT-4o-mini advisor (English)
    │                      ▼
-   │            Bhashini translate + TTS (en → gu)  →  reply.wav
+   │            Sarvam translate (mayura, en → gu) + TTS (bulbul) → reply.wav
    ◀──<Play> reply.wav──┘  then <Record> next turn
 ```
+
+**Conversation flow:** greet → ask **name** → ask **qualification** → ask
+**marks** (fixed clip *“તમારી ટકાવારી કેટલી છે?”*) → cheer (*“અરે વાહ! આ તો ખૂબ
+સરસ માર્ક્સ છે.”*) + **list suitable degrees** → student picks one → **course
+details** (duration, fees, eligibility, highlight — documents only if asked) →
+placement handled with a positive, non-numeric answer → goodbye.
 
 ---
 
@@ -37,7 +45,12 @@ copy .env.example .env       # then edit .env with your keys
 
 Fill in `.env`:
 - `OPENAI_API_KEY`
-- `BHASHINI_USER_ID`, `BHASHINI_API_KEY` (from https://bhashini.gov.in/ulca → Profile → API key)
+- `SARVAM_API_KEY` (from https://dashboard.sarvam.ai) — enables Sarvam voice
+  - optional model overrides: `SARVAM_STT_MODEL` (default `saaras:v2.5`),
+    `SARVAM_TRANSCRIBE_MODEL` (`saarika:v2.5`), `SARVAM_TTS_MODEL` (`bulbul:v2`),
+    `SARVAM_TTS_SPEAKER` (`anushka`)
+  - *(fallback) instead of Sarvam you may set `BHASHINI_INFERENCE_KEY` or
+    `BHASHINI_USER_ID` + `BHASHINI_API_KEY`*
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`
 - `PUBLIC_BASE_URL` = your ngrok https URL (set this **after** step 3)
 
@@ -65,8 +78,9 @@ In the [Twilio Console](https://console.twilio.com) → your Voice number →
 
 ## 5. Call the number and talk in Gujarati 🎉
 
-Try: *“મેં બારમું વિજ્ઞાન પૂરું કર્યું છે”* (“I have completed 12th Science”)
-→ the agent recommends B.Tech / B.Pharm etc. with fees and documents.
+Try: give your name, then *“મેં બારમું વિજ્ઞાન પૂરું કર્યું છે”* (“I have completed
+12th Science”), then your marks → the agent lists matching degrees (B.Tech /
+B.Pharm / BCA …) and gives course details for the one you choose.
 
 ---
 
@@ -77,7 +91,7 @@ Gujarati (`*_gu`) fields: `year, degree_name, fees, eligibility, required_docume
 duration, suitable_for, highlights`.
 
 - `python scripts/scrape_degrees.py` – best-effort scrape of public Marwadi sources (prints findings to review).
-- `python -m scripts.translate_degrees` – regenerate the Gujarati fields via Bhashini NMT.
+- `python -m scripts.translate_degrees` – regenerate the Gujarati fields via the NMT.
 
 > The fees/eligibility are representative demo figures compiled from public
 > aggregators. Verify against the official site before quoting to real applicants.
@@ -85,11 +99,12 @@ duration, suitable_for, highlights`.
 ---
 
 ## Latency notes
-- Pipeline config (Bhashini service ids + endpoint) is fetched **once** at startup and cached.
-- Inbound = **one** Bhashini call (ASR + translation chained); outbound = **one** call (translation + TTS chained).
+- Inbound STT runs the two Sarvam calls (saaras → English, saarika → Gujarati) **in parallel**; outbound is translate (mayura) then TTS (bulbul).
 - A single keep-alive HTTP/2 client is reused across turns.
 - `<Record timeout=3>` ends a turn after 3s of silence; TTS is rendered at 8 kHz (telephony) to cut size.
-- The greeting is pre-synthesized and cached on disk.
+- Replies are kept short (degree names spoken in full to pronounce cleanly), which shrinks the audio and speeds TTS + playback.
+- Fixed phrases (greeting, rotating fillers, marks question, marks cheer, closing) are pre-synthesized and cached on disk; the marks question/cheer turns skip TTS entirely.
+- `/process` acknowledges immediately with a short filler, then `/await` plays the reply the instant it's ready (no dead air, no silent wait).
 
 ## Web console (Next.js)
 
@@ -102,13 +117,15 @@ Sign in with `admin` / `marwadi123` (set `ADMIN_USERNAME` / `ADMIN_PASSWORD` in
 `.env`). The console has six sections:
 
 - **Dashboard** – metrics, 7-day call chart, outcomes donut, recent calls, lead funnel.
-- **Dialer** – keypad to place a single outbound call.
-- **Leads** – auto-captured from calls + manual add/edit-status/delete/filter.
+- **Dialer** – keypad to place a single outbound call, with a **live Gujarati chat**
+  panel that streams the conversation transcript as the call runs.
+- **Leads** – auto-captured from calls (name + qualification) + manual
+  add/edit-status/delete/filter.
 - **Campaigns** – type or **upload a CSV** of numbers (auto-extracted from any
   column) and dial them sequentially; live progress per number.
 - **Analytics** – 14-day volume, outcomes, direction split, lead funnel, campaign table.
-- **Call Logs** – every call with status, duration, and the full Gujarati↔English
-  transcript (click a row).
+- **Call Logs** – every call with status, duration, captured **name**, and the
+  full **Gujarati** transcript (English shown underneath) — click a row.
 
 Auth is a cookie session: `/api/*` requires login, while the Twilio webhooks
 (`/voice`, `/process`, `/await`, `/status`) stay public so calls keep working.
@@ -141,22 +158,25 @@ app/
   auth.py          cookie-session auth for the console
   dialer.py        outbound call placement + sequential campaign runner
   db.py            SQLite persistence (calls, transcripts, campaigns, leads)
-  bhashini.py      Bhashini ASR / translate / TTS client (+ float->PCM for Twilio)
-  openai_agent.py  GPT-4o-mini advisor (JSON: {reply, end})
+  voice.py         provider selector -> Sarvam (default) or Bhashini fallback
+  sarvam.py        Sarvam STT (saaras+saarika) / translate (mayura) / TTS (bulbul)
+  bhashini.py      Bhashini ASR / translate / TTS fallback (+ float->PCM for Twilio)
+  openai_agent.py  GPT-4o-mini advisor (JSON: {reply, end, name, qualification, cheer, ask_marks})
   degrees.py       loads dataset + builds the LLM catalog
-  config.py        env config + assert_ready()
+  config.py        env config + assert_ready() + use_sarvam()
 frontend/          Next.js admin console (see frontend/README.md)
 data/degrees.json  10 scraped degrees (en + gu)
 data/app.db        SQLite store (auto-created; git-ignored)
-scripts/           scrape + Bhashini-translate + smoke/webhook tests + place_call
+scripts/           scrape + translate + smoke/webhook tests + place_call
 static/audio/      generated TTS wav files (served to Twilio)
 ```
 
 ## Turn flow (low-latency)
 ```
-/voice    -> play greeting, <Record> caller
-/process  -> start background work (download->ASR->advisor->TTS),
-             play a short filler immediately, <Redirect> to /await
+/voice    -> play greeting (recorded as turn 0), <Record> caller
+/process  -> start background work (download->STT->advisor->TTS),
+             play a short rotating filler immediately, <Redirect> to /await
 /await    -> play the reply as soon as it's ready (else brief hold + poll),
+             prefixing the marks cheer when the advisor flags it,
              then <Record> next turn, or <Hangup>
 ```
